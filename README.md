@@ -136,6 +136,14 @@ python main.py --cameras 3
 
 ### 机械臂控制
 
+**设置电机 ID:**
+新电机默认 ID 通常为 1，组装前需要分别设置为 1, 2, 3, 4。
+请每次只连接一个电机，然后运行：
+```bash
+# 将 ID 1 修改为 2 (依次修改为 1-4)
+python tests/set_motor_id.py --old_id 1 --new_id 2
+```
+
 **首次使用需要校准:**
 ```bash
 # 校准所有电机

@@ -97,6 +97,37 @@ class STSServoSerial:
             time.sleep(0.1)
         return False
     
+    def set_id(self, old_id, new_id):
+        """
+        修改舵机 ID
+        注意：修改后需要重新上电或等待生效
+        """
+        print(f"正在将舵机 ID 从 {old_id} 修改为 {new_id}...")
+        
+        # 1. 解锁 EEPROM (地址 0x37 = 55, 写入 0)
+        self.serial.reset_input_buffer()
+        self.serial.reset_output_buffer()
+        self._send_packet(old_id, self.INST_WRITE, [self.REG_LOCK, 0])
+        time.sleep(0.05)
+        
+        # 2. 写入新 ID (地址 0x05 = 5)
+        self.serial.reset_input_buffer()
+        self.serial.reset_output_buffer()
+        # ID 寄存器地址是 0x05
+        REG_ID = 0x05
+        self._send_packet(old_id, self.INST_WRITE, [REG_ID, new_id])
+        time.sleep(0.05)
+        
+        # 3. 锁定 EEPROM (地址 0x37 = 55, 写入 1)
+        # 注意：此时可能需要用新 ID 发送，也可能旧 ID 还可以用，保险起见用新 ID 尝试锁定
+        self.serial.reset_input_buffer()
+        self.serial.reset_output_buffer()
+        self._send_packet(new_id, self.INST_WRITE, [self.REG_LOCK, 1])
+        time.sleep(0.1)
+        
+        print(f"  ✓ 修改命令已发送，请检查舵机是否响应新 ID: {new_id}")
+        return True
+
     def set_torque_enable(self, servo_id, enable):
         """使能/失能舵机"""
         value = 1 if enable else 0
