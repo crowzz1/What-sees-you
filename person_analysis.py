@@ -23,46 +23,13 @@ try:
 except ImportError:
     DEPTH_AVAILABLE = False
 
-# TouchDesigner transmitter
-try:
-    from td_transmitter import TouchDesignerTransmitter
-    TD_AVAILABLE = True
-except ImportError:
-    print("Warning: td_transmitter not found. TouchDesigner transmission disabled.")
-    print("  Install with: pip install python-osc")
-    TD_AVAILABLE = False
+# TouchDesigner transmitter (Moved to integrations/)
+TD_AVAILABLE = False
 
-# Oscilloscope overlay (audio-reactive visualization)
-try:
-    from oscilloscope_overlay import OscilloscopeOverlay
-    OSCILLOSCOPE_AVAILABLE = True
-    
-    # 读取用户配置
-    try:
-        from oscilloscope_config_user import (
-            ENABLE_OSCILLOSCOPE_AUDIO,
-            OSCILLOSCOPE_WIDTH,
-            OSCILLOSCOPE_HEIGHT,
-            OSCILLOSCOPE_POSITION
-        )
-    except ImportError:
-        # 如果没有配置文件，使用默认值
-        ENABLE_OSCILLOSCOPE_AUDIO = False  # 默认禁用音频，避免冲突
-        OSCILLOSCOPE_WIDTH = 300
-        OSCILLOSCOPE_HEIGHT = 300
-        OSCILLOSCOPE_POSITION = 'bottom-right'
-        
-except ImportError:
-    print("Warning: oscilloscope_overlay not found. Audio visualization disabled.")
-    OSCILLOSCOPE_AVAILABLE = False
-    ENABLE_OSCILLOSCOPE_AUDIO = False
-
-# AI描述生成器
-try:
-    from ai_description_generator import AIDescriptionGenerator
-    AI_DESC_AVAILABLE = True
-except ImportError:
-    AI_DESC_AVAILABLE = False
+# Oscilloscope & AI Description removed
+OSCILLOSCOPE_AVAILABLE = False
+ENABLE_OSCILLOSCOPE_AUDIO = False
+AI_DESC_AVAILABLE = False
 
 # Suppress warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
@@ -98,21 +65,9 @@ except ImportError:
     print("Warning: InsightFace not installed.")
     INSIGHTFACE_AVAILABLE = False
 
-# FER (Facial Expression Recognition) imports
-try:
-    from fer import FER
-    FER_AVAILABLE = True
-except ImportError:
-    print("Warning: FER not installed. Install with: pip install fer")
-    FER_AVAILABLE = False
-
-# DeepFace imports (for additional emotion)
-try:
-    from deepface import DeepFace
-    DEEPFACE_AVAILABLE = True
-except ImportError:
-    print("Warning: DeepFace not installed. Install with: pip install deepface")
-    DEEPFACE_AVAILABLE = False
+# FER & DeepFace removed to avoid warnings
+FER_AVAILABLE = False
+DEEPFACE_AVAILABLE = False
 
 class CompletePersonFaceAnalyzer:
     """Complete person and face analysis with all attributes"""
