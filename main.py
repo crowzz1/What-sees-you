@@ -10,9 +10,17 @@
 import cv2
 import numpy as np
 import time
+import warnings
+
+# 过滤 InsightFace 的 FutureWarning
+warnings.filterwarnings("ignore", category=FutureWarning, module="insightface")
+warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
+
 from person_analysis import CompletePersonFaceAnalyzer
 from tracker import AdvancedTracker # 导入追踪器
 from visual_style import GlitchArtEffect # 导入故障艺术效果
+from config import ARM_PORT, ARM_BAUDRATE # 导入硬件配置
+from osc_control import OscController # 导入OSC控制器
 
 class GalleryView:
     """画廊式视图系统"""
@@ -81,8 +89,8 @@ class GalleryView:
         # print("\n[性能模式] 已启用：关闭分割和人脸分析以提高帧率")
         # self.analyzer.segmentation_enabled = False
         self.analyzer.segmentation_enabled = True # 重新开启分割以获得精确轮廓
-        self.analyzer.face_enabled = False
-        self.analyzer.emotion_enabled = False
+        self.analyzer.face_enabled = True  # 开启人脸识别
+        self.analyzer.emotion_enabled = True # 开启情绪识别 (使用 HSEmotion)
         # ----------------
         
         # 默认开启特效
@@ -98,13 +106,45 @@ class GalleryView:
             canvas_height=self.top_height
         )
         print("✓ 故障艺术引擎已就绪")
+
+        # 初始化 OSC 控制器
+        print("\n初始化 OSC 控制器...")
+        try:
+            self.osc = OscController(ip="127.0.0.1", port=7001)
+            
+            # 注册通道
+            # 背景
+            self.osc.add_channel('Bg', '/Bg', initial_value=0.0, smoothing=0.1)
+            
+            # 情绪 + 颜色
+            self.osc.add_channel('Neutral_Green_Cyan', '/Neutral_Green_Cyan', smoothing=0.1)
+            self.osc.add_channel('Happiness_Yellow_Orange', '/Happiness_Yellow_Orange', smoothing=0.1)
+            self.osc.add_channel('Surprise_White_Pink', '/Surprise_White_Pink', smoothing=0.1)
+            self.osc.add_channel('Sadness_Blue_Purple', '/Sadness_Blue_Purple', smoothing=0.1)
+            self.osc.add_channel('Fear_Black', '/Fear_Black', smoothing=0.1)
+            self.osc.add_channel('Anger_Red', '/Anger_Red', smoothing=0.1)
+            self.osc.add_channel('Disgust_Contempt_Gray', '/Disgust_Contempt_Gray', smoothing=0.1)
+            
+            # 体型
+            self.osc.add_channel('Slim', '/Slim', smoothing=0.1)
+            self.osc.add_channel('Average', '/Average', smoothing=0.1)
+            self.osc.add_channel('Broad', '/Broad', smoothing=0.1)
+            
+            print("✓ OSC 控制器已启动 (127.0.0.1:7001)")
+        except Exception as e:
+            print(f"✗ OSC 初始化失败: {e}")
+            self.osc = None
         
         # 初始化 AdvancedTracker (用于后台追踪，不显示在UI上)
         print("\n初始化手部追踪器 (AdvancedTracker)...")
         try:
-            # 不使用内部摄像头，只使用电机控制逻辑
-            # 不加载模型，使用外部传入的结果
-            self.tracker = AdvancedTracker(camera_id=None, use_internal_camera=False, load_model=False)
+            # AdvancedTracker 不接受 baud_rate 参数，且默认波特率为 1000000
+            # 我们需要禁用内部摄像头和模型加载，因为我们在外部处理
+            self.tracker = AdvancedTracker(
+                port=ARM_PORT, 
+                use_internal_camera=False, 
+                load_model=False
+            )
             print("✓ 追踪器已集成 (后台运行)")
         except Exception as e:
             print(f"✗ 追踪器初始化失败: {e}")
@@ -140,6 +180,95 @@ class GalleryView:
         resized = cv2.resize(frame, (target_width, target_height), interpolation=cv2.INTER_LINEAR)
         return resized
     
+    def update_osc(self, results, active_idx):
+        """
+        更新 OSC 通道状态
+        逻辑：
+        1. 如果有 active_idx (追踪目标):
+           - 读取目标的 emotion 和 clothing color
+           - 映射到对应的通道 (Emotion OR Color)
+           - 读取 body_type 并映射
+        2. 如果没有目标:
+           - 所有情绪和体型通道归零
+        3. 始终发送数据
+        """
+        if not self.osc:
+            return
+
+        # 默认所有通道目标值为 0
+        target_values = {
+            'Neutral_Green_Cyan': 0.0,
+            'Happiness_Yellow_Orange': 0.0,
+            'Surprise_White_Pink': 0.0,
+            'Sadness_Blue_Purple': 0.0,
+            'Fear_Black': 0.0,
+            'Anger_Red': 0.0,
+            'Disgust_Contempt_Gray': 0.0,
+            'Slim': 0.0,
+            'Average': 0.0,
+            'Broad': 0.0
+        }
+        
+        if active_idx is not None and 0 <= active_idx < len(results):
+            person = results[active_idx]
+            
+            # --- 1. 情绪 & 颜色 映射 ---
+            emotion = person.get('emotion', '').lower() if person.get('emotion') else ''
+            
+            # 获取衣服颜色 (检查 upper 和 lower, 只要有一个匹配即可)
+            clothing = person.get('clothing', {})
+            colors = set()
+            if clothing.get('upper_color'): colors.add(clothing['upper_color'].lower())
+            if clothing.get('lower_color'): colors.add(clothing['lower_color'].lower())
+            
+            # 映射逻辑: 情绪 OR 颜色
+            # Neutral / Green / Cyan
+            if emotion == 'neutral' or 'green' in colors or 'cyan' in colors:
+                target_values['Neutral_Green_Cyan'] = 1.0
+            
+            # Happiness / Yellow / Orange
+            if emotion == 'happy' or 'happiness' in emotion or 'yellow' in colors or 'orange' in colors:
+                target_values['Happiness_Yellow_Orange'] = 1.0
+                
+            # Surprise / White / Pink
+            if emotion == 'surprise' or 'white' in colors or 'pink' in colors:
+                target_values['Surprise_White_Pink'] = 1.0
+                
+            # Sadness / Blue / Purple
+            if emotion == 'sad' or 'sadness' in emotion or 'blue' in colors or 'purple' in colors:
+                target_values['Sadness_Blue_Purple'] = 1.0
+                
+            # Fear / Black
+            if emotion == 'fear' or 'black' in colors:
+                target_values['Fear_Black'] = 1.0
+                
+            # Anger / Red
+            if emotion == 'angry' or 'anger' in emotion or 'red' in colors:
+                target_values['Anger_Red'] = 1.0
+                
+            # Disgust / Contempt / Gray
+            if (emotion == 'disgust' or emotion == 'contempt' or 
+                'gray' in colors or 'grey' in colors or 'mixed' in colors):
+                target_values['Disgust_Contempt_Gray'] = 1.0
+            
+            # --- 2. 体型 映射 ---
+            body_type = person.get('body_type', {})
+            if body_type:
+                build = body_type.get('build', '').lower()
+                if build == 'slim':
+                    target_values['Slim'] = 1.0
+                elif build == 'broad' or build == 'stocky' or build == 'athletic':
+                    target_values['Broad'] = 1.0
+                else: # Average, or others
+                    target_values['Average'] = 1.0
+        
+        # 应用目标值
+        for name, val in target_values.items():
+            self.osc.set_value(name, val)
+            
+        # 更新 OSC 控制器 (发送数据)
+        self.osc.update()
+
     def _apply_effect_with_mask(self, frame, person_mask, results):
         """
         使用已有的mask应用silhouette效果（避免重新分割）
@@ -201,13 +330,15 @@ class GalleryView:
             
             # 人物标识
             person_id = r.get('person_id', idx + 1)
-            cv2.putText(info_canvas, f"PERSON {person_id}", 
-                       (30, y_offset),
-                       cv2.FONT_HERSHEY_SIMPLEX, font_scale_base, (255, 255, 255), 2)
-            y_offset += line_height + 5
+            # 如果是被追踪的目标，加星号或高亮
+            is_target = r.get('is_target', False)
+            target_marker = "[TARGET]" if is_target else ""
+            color = (0, 255, 0) if is_target else (255, 255, 255)
             
-            # ... (其他信息显示代码保持逻辑一致，但使用新的宽度限制) ...
-            # 简化：为了代码简洁，我直接在这里更新后续的绘制逻辑
+            cv2.putText(info_canvas, f"PERSON {person_id} {target_marker}", 
+                       (30, y_offset),
+                       cv2.FONT_HERSHEY_SIMPLEX, font_scale_base, color, 2)
+            y_offset += line_height + 5
             
             # 年龄
             if r.get('face'):
@@ -220,7 +351,10 @@ class GalleryView:
             # 情绪
             if r.get('emotion'):
                 emotion = r['emotion'].capitalize()
-                cv2.putText(info_canvas, f"Emotion: {emotion}", 
+                conf = r.get('emotion_conf')
+                if conf is None:
+                    conf = 0.0
+                cv2.putText(info_canvas, f"Emotion: {emotion} ({conf:.0%})", 
                            (50, y_offset),
                            cv2.FONT_HERSHEY_SIMPLEX, font_scale_detail, (200, 200, 200), 1)
                 y_offset += line_height
@@ -237,9 +371,19 @@ class GalleryView:
             # 衣服
             if r.get('clothing'):
                 clothing = r['clothing']
+                
+                # 上衣颜色
                 upper_color = clothing.get('upper_color', '')
                 if upper_color:
-                    cv2.putText(info_canvas, f"Clothes: {upper_color}", 
+                    cv2.putText(info_canvas, f"Upper: {upper_color}", 
+                               (50, y_offset),
+                               cv2.FONT_HERSHEY_SIMPLEX, font_scale_detail, (200, 200, 200), 1)
+                    y_offset += line_height
+
+                # 下装颜色
+                lower_color = clothing.get('lower_color', '')
+                if lower_color:
+                    cv2.putText(info_canvas, f"Lower: {lower_color}", 
                                (50, y_offset),
                                cv2.FONT_HERSHEY_SIMPLEX, font_scale_detail, (200, 200, 200), 1)
                     y_offset += line_height
@@ -347,6 +491,11 @@ class GalleryView:
         
         self.running = True
         
+        # 发送 OSC 启动信号
+        if self.osc:
+            self.osc.set_value('Bg', 1.0)
+            self.osc.update()
+        
         # 创建全屏窗口
         cv2.namedWindow('Gallery View', cv2.WINDOW_NORMAL)
         cv2.resizeWindow('Gallery View', self.window_width, self.window_height)
@@ -392,6 +541,16 @@ class GalleryView:
                     tracker_frame = self.tracker.process_frame(frame, external_results=results)
                     # 获取当前追踪的人员索引
                     tracker_active_idx = self.tracker.active_target_index
+                    
+                    # 标记 results 中的目标
+                    for i, res in enumerate(results):
+                        if i == tracker_active_idx:
+                            res['is_target'] = True
+                        else:
+                            res['is_target'] = False
+
+                # 更新 OSC (根据当前追踪目标)
+                self.update_osc(results, tracker_active_idx)
                 
                 # 左侧：黑色格子
                 self.analyzer.enable_effects = True
@@ -405,7 +564,12 @@ class GalleryView:
                 
                 # 右侧：故障艺术 (Glitch Art)
                 # 传入 tracker_active_idx，让右上角只显示被追踪的人
-                glitch_frame = self.glitch_effect.create_glitch_frame(clean_frame, results, target_person_idx=tracker_active_idx)
+                # create_glitch_frame(frame, results, target_person_idx=None)
+                glitch_frame = self.glitch_effect.create_glitch_frame(
+                    clean_frame, 
+                    results, 
+                    target_person_idx=tracker_active_idx
+                )
                 
                 # ===== 3. 创建组合视图 =====
                 # 注意：tracker_frame 已经生成了，传给 create_composite_view 避免重复计算
@@ -434,6 +598,27 @@ class GalleryView:
     
     def close(self):
         """关闭系统"""
+        # 发送 OSC 关闭信号
+        if self.osc:
+            print("正在关闭 OSC 通道...")
+            # 强制直接发送 0，绕过平滑逻辑，确保归零
+            if hasattr(self.osc, 'client'):
+                try:
+                    # 发送两次以防丢包
+                    for _ in range(2):
+                        # 1. 背景归零
+                        self.osc.client.send_message('/Bg', 0.0)
+                        
+                        # 2. 所有其他通道归零
+                        for name, channel in self.osc.channels.items():
+                            if name != 'Bg':
+                                self.osc.client.send_message(channel.address, 0.0)
+                        
+                        time.sleep(0.02)
+                            
+                except Exception as e:
+                    print(f"OSC 关闭发送失败: {e}")
+
         self.running = False
         if self.cap:
             self.cap.release()

@@ -791,6 +791,14 @@ class AdvancedTracker:
     def close(self):
         print("\n关闭系统...")
         print("="*40)
+        
+        if not self.driver:
+            print("驱动未连接，跳过电机归位")
+            if self.cap: self.cap.release()
+            cv2.destroyAllWindows()
+            print("✓ 系统已关闭")
+            return
+
         print("所有电机 -> 中点 (speed=400)...")
         
         # 并行发送指令让所有电机回中点
@@ -816,8 +824,9 @@ class AdvancedTracker:
             
         print("失能电机...")
         for motor_id in [1, 2, 3, 4]:
-            if self.driver: self.driver.set_torque_enable(motor_id, False)
-        if self.driver: self.driver.close()
+            self.driver.set_torque_enable(motor_id, False)
+            
+        self.driver.close()
         if self.cap: self.cap.release()
         cv2.destroyAllWindows()
         print("✓ 系统已关闭")

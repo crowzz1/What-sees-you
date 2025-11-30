@@ -16,6 +16,18 @@ import time
 import os
 import random
 
+# TensorFlow GPU Memory Growth (Prevent DeepFace from hogging all VRAM)
+try:
+    import tensorflow as tf
+    gpus = tf.config.experimental.list_physical_devices('GPU')
+    if gpus:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+except ImportError:
+    pass
+except Exception as e:
+    print(f"Warning: Could not set TF memory growth: {e}")
+
 # Depth estimation (optional)
 try:
     import torch.nn.functional as F
@@ -65,9 +77,25 @@ except ImportError:
     print("Warning: InsightFace not installed.")
     INSIGHTFACE_AVAILABLE = False
 
-# FER & DeepFace removed to avoid warnings
-FER_AVAILABLE = False
+# HSEmotion imports (Primary for Emotion)
+try:
+    # Monkey Patch torch.load to disable weights_only check for HSEmotion
+    _original_load = torch.load
+    def _safe_load(*args, **kwargs):
+        if 'weights_only' not in kwargs:
+            kwargs['weights_only'] = False
+        return _original_load(*args, **kwargs)
+    torch.load = _safe_load
+    
+    from hsemotion.facial_emotions import HSEmotionRecognizer
+    HSEMOTION_AVAILABLE = True
+except ImportError:
+    print("Warning: hsemotion not installed.")
+    HSEMOTION_AVAILABLE = False
+
+# Clean up DeepFace/FER references
 DEEPFACE_AVAILABLE = False
+FER_AVAILABLE = False
 
 class CompletePersonFaceAnalyzer:
     """Complete person and face analysis with all attributes"""
@@ -175,8 +203,10 @@ class CompletePersonFaceAnalyzer:
                     name='buffalo_l',
                     providers=['CUDAExecutionProvider', 'CPUExecutionProvider'] if self.device.type == 'cuda' else ['CPUExecutionProvider']
                 )
+                # Use 640x640 for stability (official recommendation)
+                # Square input avoids broadcast shape errors with 1920x1080 frames
                 self.face_app.prepare(ctx_id=0 if self.device.type == 'cuda' else -1, det_size=(640, 640))
-                print("  ✓ InsightFace loaded!")
+                print("  ✓ InsightFace loaded! (det_size: 640x640)")
                 self.face_enabled = True
             except Exception as e:
                 print(f"  ✗ InsightFace failed: {e}")
@@ -184,15 +214,19 @@ class CompletePersonFaceAnalyzer:
         else:
             self.face_enabled = False
         
-        # Load FER for emotion recognition
-        if FER_AVAILABLE:
-            print("Loading FER for emotion recognition...")
+        # Load HSEmotion for emotion recognition
+        if HSEMOTION_AVAILABLE:
+            print("Loading HSEmotion for emotion recognition...")
             try:
-                self.emotion_detector = FER(mtcnn=False)  # Use faster detector
-                print("  ✓ FER loaded!")
+                # 使用推荐的模型 (支持 GPU)
+                self.emotion_detector = HSEmotionRecognizer(
+                    model_name='enet_b0_8_best_vgaf', 
+                    device='cuda' if self.device.type == 'cuda' else 'cpu'
+                )
+                print("  ✓ HSEmotion loaded! (EfficientNet-B0)")
                 self.emotion_enabled = True
             except Exception as e:
-                print(f"  ✗ FER failed: {e}")
+                print(f"  ✗ HSEmotion failed: {e}")
                 self.emotion_enabled = False
         else:
             self.emotion_enabled = False
@@ -227,13 +261,18 @@ class CompletePersonFaceAnalyzer:
         
         # Emotion text mapping (避免终端不支持emoji)
         self.emotion_text = {
-            'angry': 'Angry',
+            'angry': 'Anger',
             'disgust': 'Disgust',
             'fear': 'Fear',
-            'happy': 'Happy',
-            'sad': 'Sad',
+            'happy': 'Happiness',
+            'sad': 'Sadness',
             'surprise': 'Surprise',
-            'neutral': 'Neutral'
+            'neutral': 'Neutral',
+            # HSEmotion mappings
+            'anger': 'Anger',
+            'happiness': 'Happiness',
+            'sadness': 'Sadness',
+            'contempt': 'Contempt'
         }
         
         # Performance settings
@@ -245,6 +284,10 @@ class CompletePersonFaceAnalyzer:
         # Age smoothing - 保存最近N次年龄检测结果
         self.age_history = {}  # person_id: [age1, age2, ...]
         self.age_history_size = 5  # 保留最近5次结果
+        
+        # Emotion smoothing - 保存最近N次情绪检测结果
+        self.emotion_history = {}  # person_id: [emotion1, emotion2, ...]
+        self.emotion_history_size = 5  # 保留最近5次结果，取众数
         
         # Auto-print descriptions
         self.auto_print_descriptions = False
@@ -286,8 +329,8 @@ class CompletePersonFaceAnalyzer:
         print("  ✓ Body: 17 Keypoints, Clothing, Color, Body Type")
         if self.face_enabled:
             print("  ✓ Face: Age")
-        if self.emotion_enabled or DEEPFACE_AVAILABLE:
-            print("  ✓ Emotion: 7 expressions (via DeepFace)")
+        if self.emotion_enabled:
+            print("  ✓ Emotion: 8 expressions (via HSEmotion)")
         if self.segmentation_enabled:
             print("  ✓ Visual Effects: Precise Segmentation (YOLOv8-Seg)")
         else:
@@ -378,53 +421,75 @@ class CompletePersonFaceAnalyzer:
             
             return face_results
         except Exception as e:
+            print(f"InsightFace error: {e}")
             return []
     
     def detect_emotion(self, face_region):
         """Detect emotion using DeepFace or FER"""
+        # print(f"DEBUG: detect_emotion called. DeepFace available: {DEEPFACE_AVAILABLE}")
         if not DEEPFACE_AVAILABLE and not self.emotion_enabled:
             return None, None
         
         try:
             # Try DeepFace first (if available)
             if DEEPFACE_AVAILABLE:
-                result = DeepFace.analyze(
-                    img_path=face_region,
-                    actions=['emotion'],
-                    enforce_detection=False,
-                    detector_backend='skip',
-                    silent=True
-                )
-                
-                if isinstance(result, list):
-                    result = result[0]
-                
-                if 'dominant_emotion' in result:
-                    dominant_emotion = result['dominant_emotion']
-                    confidence = result['emotion'][dominant_emotion] / 100.0  # Convert to 0-1
-                    return dominant_emotion, confidence
+                # print("DEBUG: Calling DeepFace...")
+                try:
+                    result = DeepFace.analyze(
+                        img_path=face_region,
+                        actions=['emotion'],
+                        enforce_detection=False,
+                        detector_backend='skip',
+                        silent=True
+                    )
+                    
+                    if isinstance(result, list):
+                        result = result[0]
+                    
+                    if 'dominant_emotion' in result:
+                        dominant_emotion = result['dominant_emotion']
+                        confidence = result['emotion'][dominant_emotion] / 100.0  # Convert to 0-1
+                        # print(f"DEBUG: DeepFace success: {dominant_emotion}")
+                        return dominant_emotion, confidence
+                except Exception as e:
+                    print(f"DeepFace runtime error: {e}")
+                    pass
             
             # Fallback to FER if available
             if self.emotion_enabled and hasattr(self, 'emotion_detector'):
+                # print(f"FER Debug: Input shape {face_region.shape}")
                 emotions = self.emotion_detector.detect_emotions(face_region)
+                # print(f"FER Debug: Result {emotions}")
                 if emotions and len(emotions) > 0:
                     emotion_scores = emotions[0]['emotions']
                     dominant_emotion = max(emotion_scores, key=emotion_scores.get)
                     confidence = emotion_scores[dominant_emotion]
                     return dominant_emotion, confidence
+                else:
+                    # Try forcing it if detection fails? No direct API for that in simple FER.
+                    pass
             
             return None, None
         except Exception as e:
+            print(f"Emotion detection error: {e}")
             return None, None
     
     def match_face_to_person(self, person_bbox, face_bbox):
-        """Check if face belongs to person"""
+        """Check if face belongs to person (relaxed matching)"""
         px1, py1, px2, py2 = person_bbox
         fx1, fy1, fx2, fy2 = face_bbox
         
-        if fx1 >= px1-20 and fx2 <= px2+20 and fy1 >= py1-20 and fy2 <= py2+20:
-            if fy1 < py1 + (py2 - py1) * 0.4:
+        # Calculate face center
+        face_cx = (fx1 + fx2) / 2
+        face_cy = (fy1 + fy2) / 2
+        
+        # 放宽判定：只要人脸中心在身体框的水平范围内
+        if px1 <= face_cx <= px2:
+            person_height = py2 - py1
+            # 这里的 0.6 改成 0.9，防止因为抬头或拍摄角度导致人脸位置偏高而被过滤
+            if py1 - person_height * 0.2 <= face_cy <= py1 + person_height * 0.9:
                 return True
+                
         return False
     
     def smooth_age(self, person_id, raw_age):
@@ -441,6 +506,23 @@ class CompletePersonFaceAnalyzer:
         
         # Return average
         return int(sum(self.age_history[person_id]) / len(self.age_history[person_id]))
+    
+    def smooth_emotion(self, person_id, raw_emotion):
+        """Smooth emotion using voting (mode)"""
+        if person_id not in self.emotion_history:
+            self.emotion_history[person_id] = []
+        
+        # Add new emotion to history
+        self.emotion_history[person_id].append(raw_emotion)
+        
+        # Keep only recent N values
+        if len(self.emotion_history[person_id]) > self.emotion_history_size:
+            self.emotion_history[person_id] = self.emotion_history[person_id][-self.emotion_history_size:]
+        
+        # Return most frequent emotion (mode)
+        from collections import Counter
+        counts = Counter(self.emotion_history[person_id])
+        return counts.most_common(1)[0][0]
     
     def analyze_body_type(self, keypoints, bbox):
         """Analyze body type from keypoints"""
@@ -478,7 +560,7 @@ class CompletePersonFaceAnalyzer:
             elif height_width_ratio > 2.0:
                 build = "Slim"
             elif height_width_ratio < 1.8:
-                build = "Stocky"
+                build = "Broad"
             else:
                 build = "Average"
             
@@ -496,46 +578,99 @@ class CompletePersonFaceAnalyzer:
         except:
             return None
     
-    def get_color(self, image_region):
-        """Extract dominant color with confidence score"""
+    def get_color(self, image_region, mask=None):
+        """Extract dominant color using HSV + Mask filtering (More Robust)"""
         if image_region is None or image_region.size == 0:
             return None, 0.0
         
         try:
-            small = cv2.resize(image_region, (40, 40))
-            rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
-            pixels = rgb.reshape(-1, 3)
+            # 1. Pre-processing: Resize for speed
+            target_size = (64, 64)
+            img_small = cv2.resize(image_region, target_size)
             
-            kmeans = KMeans(n_clusters=1, random_state=42, n_init=5, max_iter=50)
+            # 2. Masking: Only use pixels inside the person silhouette
+            if mask is not None:
+                mask_small = cv2.resize(mask, target_size)
+                # Binarize mask
+                _, mask_bin = cv2.threshold(mask_small, 128, 255, cv2.THRESH_BINARY)
+                # Extract valid pixels (BGR)
+                pixels = img_small[mask_bin > 0]
+                
+                # If too few pixels (e.g. empty mask), fallback to whole image or return None
+                if len(pixels) < 50:
+                    # Fallback: use center crop if mask failed
+                    h, w = img_small.shape[:2]
+                    center_pixels = img_small[h//4:h*3//4, w//4:w*3//4].reshape(-1, 3)
+                    pixels = center_pixels
+            else:
+                # No mask provided, use whole image
+                pixels = img_small.reshape(-1, 3)
+            
+            if len(pixels) == 0:
+                return None, 0.0
+
+            # 3. K-Means clustering to find Dominant Color (in BGR space)
+            # n_init='auto' is default in newer sklearn, using fixed number for compatibility
+            kmeans = KMeans(n_clusters=1, random_state=42, n_init=3)
             kmeans.fit(pixels)
-            color = kmeans.cluster_centers_[0].astype(int)
+            dominant_bgr = kmeans.cluster_centers_[0].astype(int)
             
-            # 计算置信度：基于聚类内聚性（inertia越小，置信度越高）
-            # 归一化到0-1范围（假设最大inertia约为10000）
+            # Calculate confidence based on compactness (inertia)
+            # Normalized by number of pixels
             inertia = kmeans.inertia_
-            color_confidence = max(0.0, min(1.0, 1.0 - (inertia / 10000.0)))
+            avg_dist = inertia / len(pixels) if len(pixels) > 0 else 0
+            # Heuristic: avg_dist < 500 is very pure, > 3000 is mixed
+            color_confidence = max(0.0, min(1.0, 1.0 - (avg_dist / 4000.0)))
             
-            r, g, b = color
+            # 4. Convert Dominant Color to HSV for robust classification
+            # Create a 1x1 pixel to convert color space
+            pixel_bgr = np.uint8([[dominant_bgr]])
+            pixel_hsv = cv2.cvtColor(pixel_bgr, cv2.COLOR_BGR2HSV)[0][0]
             
-            if max(r, g, b) - min(r, g, b) < 30:
-                if max(r, g, b) < 60:
-                    return 'Black', color_confidence
-                elif max(r, g, b) > 190:
-                    return 'White', color_confidence
-                else:
-                    return 'Gray', color_confidence
+            h_val, s_val, v_val = int(pixel_hsv[0]), int(pixel_hsv[1]), int(pixel_hsv[2])
             
-            if r > g + 20 and r > b + 20:
+            # === HSV Color Classification Rules ===
+            # OpenCV HSV ranges: H: 0-179, S: 0-255, V: 0-255
+            
+            # 1. Achromatic Colors (Black, White, Gray)
+            # Check saturation and value
+            
+            # Black: Very low value (dark)
+            if v_val < 40: 
+                return 'Black', color_confidence
+            
+            # White: Very low saturation AND high value (bright)
+            if s_val < 30 and v_val > 200:
+                return 'White', color_confidence
+                
+            # Gray: Low saturation, medium value
+            if s_val < 40:
+                return 'Gray', color_confidence
+            
+            # 2. Chromatic Colors (based on Hue)
+            # H values are halved degrees (0-360 -> 0-179)
+            
+            if (0 <= h_val <= 10) or (160 <= h_val <= 179):
                 return 'Red', color_confidence
-            elif g > r + 20 and g > b + 20:
-                return 'Green', color_confidence
-            elif b > r + 20 and b > g + 20:
-                return 'Blue', color_confidence
-            elif r > 130 and g > 130 and b < 100:
+            elif 11 <= h_val <= 25:
+                return 'Orange', color_confidence
+            elif 26 <= h_val <= 35:
                 return 'Yellow', color_confidence
+            elif 36 <= h_val <= 85:
+                return 'Green', color_confidence
+            elif 86 <= h_val <= 99:
+                return 'Cyan', color_confidence
+            elif 100 <= h_val <= 130:
+                return 'Blue', color_confidence
+            elif 131 <= h_val <= 150:
+                return 'Purple', color_confidence
+            elif 151 <= h_val <= 159:
+                return 'Pink', color_confidence
             
             return 'Mixed', color_confidence
-        except:
+            
+        except Exception as e:
+            # print(f"Color extraction error: {e}")
             return None, 0.0
     
     def classify_clothing_type(self, person_roi, keypoints, upper_roi, lower_roi):
@@ -664,8 +799,13 @@ class CompletePersonFaceAnalyzer:
             if clothing_type:
                 upper_type = clothing_type.get('upper', '').lower()
                 lower_type = clothing_type.get('lower', '').lower() if clothing_type.get('lower') else None
-                upper_color = clothing.get('upper_color', '').lower()
-                lower_color = clothing.get('lower_color', '').lower()
+                
+                # 安全获取颜色并转小写
+                upper_color_raw = clothing.get('upper_color')
+                lower_color_raw = clothing.get('lower_color')
+                
+                upper_color = upper_color_raw.lower() if upper_color_raw else None
+                lower_color = lower_color_raw.lower() if lower_color_raw else None
                 
                 # Upper clothing
                 if upper_type == 'dress':
@@ -1051,12 +1191,25 @@ class CompletePersonFaceAnalyzer:
         在特效帧上绘制识别信息（边界框、人脸框、关节点、骨架、文本），根据背景自动调整颜色
         """
         font = cv2.FONT_HERSHEY_SIMPLEX
+        h, w = effect_frame.shape[:2]
         
         for idx, r in enumerate(results):
             if 'bbox' not in r:
                 continue
                 
             x1, y1, x2, y2 = r['bbox']
+            
+            # === 同步 draw_data_blocks 的扩大逻辑，确保框能包住格子 ===
+            w_box = x2 - x1
+            h_box = y2 - y1
+            pad_w = int(w_box * 0.15)
+            pad_h = int(h_box * 0.1)
+            
+            x1 = max(0, int(x1 - pad_w))
+            y1 = max(0, int(y1 - pad_h))
+            x2 = min(w, int(x2 + pad_w))
+            y2 = min(h, int(y2 + pad_h))
+            # ========================================================
             
             # 1. 绘制人体边界框（自适应颜色）
             # 采样边界框四个角的颜色，取多数
@@ -1131,15 +1284,15 @@ class CompletePersonFaceAnalyzer:
                 y_offset -= 35
             
             # Emotion（特效模式下使用黑色）
-            if r.get('emotion'):
-                emotion_display = self.emotion_text.get(r['emotion'], 'Neutral')
-                emotion_text = f"Emotion: {emotion_display}"
-                if r.get('emotion_conf'):
-                    emotion_text += f" ({r['emotion_conf']*100:.0f}%)"
-                text_color = (0, 0, 0)  # 改回黑色
-                cv2.putText(effect_frame, emotion_text, (x1, y_offset),
-                           font, 1.2, text_color, 2)
-                y_offset -= 35
+            emotion = r.get('emotion')
+            emotion_display = self.emotion_text.get(emotion, 'Neutral') if emotion else 'Analyzing...'
+            emotion_text = f"Emotion: {emotion_display}"
+            if emotion and r.get('emotion_conf'):
+                emotion_text += f" ({r['emotion_conf']*100:.0f}%)"
+            text_color = (0, 0, 0)  # 改回黑色
+            cv2.putText(effect_frame, emotion_text, (x1, y_offset),
+                       font, 1.2, text_color, 2)
+            y_offset -= 35
             
             # Age（特效模式下使用黑色）
             if r.get('face'):
@@ -1159,11 +1312,12 @@ class CompletePersonFaceAnalyzer:
                        font, 1.2, text_color, 2)
             
             # 3. 绘制人脸边界框（红色，最后绘制，显示在最上层）
-            if r.get('face'):
-                face = r['face']
-                if 'bbox' in face:
-                    fx1, fy1, fx2, fy2 = face['bbox']
-                    cv2.rectangle(effect_frame, (fx1, fy1), (fx2, fy2), (0, 0, 255), 1)  # 红色
+            # 已根据用户要求移除
+            # if r.get('face'):
+            #     face = r['face']
+            #     if 'bbox' in face:
+            #         fx1, fy1, fx2, fy2 = face['bbox']
+            #         cv2.rectangle(effect_frame, (fx1, fy1), (fx2, fy2), (0, 0, 255), 1)  # 红色
             
             # 4. 绘制关节点和骨架（红色，最后绘制，显示在最上层）
             # 已根据用户要求移除
@@ -1619,28 +1773,80 @@ class CompletePersonFaceAnalyzer:
             # Analyze face attributes (independent of body analysis)
             if matching_face:
                 fx1, fy1, fx2, fy2 = matching_face['bbox']
-                face_region = frame[fy1:fy2, fx1:fx2]
                 
-                # Emotion detection
-                if should_analyze_emotion_local and face_region.size > 0:
-                    new_emotion, new_emotion_conf = self.detect_emotion(face_region)
-                    if new_emotion is not None:
-                        emotion = new_emotion
-                        emotion_conf = new_emotion_conf
-                        self.cached_results[person_id]['emotion'] = emotion
-                        self.cached_results[person_id]['emotion_conf'] = emotion_conf
+                # Add padding for better emotion detection
+                h, w = frame.shape[:2]
+                pad_x = int((fx2 - fx1) * 0.2)
+                pad_y = int((fy2 - fy1) * 0.2)
+                
+                fx1_pad = max(0, fx1 - pad_x)
+                fy1_pad = max(0, fy1 - pad_y)
+                fx2_pad = min(w, fx2 + pad_x)
+                fy2_pad = min(h, fy2 + pad_y)
+                
+                # [关键修改 1] 必须使用 .copy()，否则 TensorFlow 可能会报错
+                face_region = frame[fy1_pad:fy2_pad, fx1_pad:fx2_pad].copy()
+                
+                # Emotion detection - Using HSEmotion (EfficientNet)
+                if HSEMOTION_AVAILABLE and self.emotion_enabled and face_region.size > 0 and self.frame_counter % 5 == 0:
+                    try:
+                        # predict_emotions returns (emotion_label, scores_list)
+                        # emotion_label is like 'Happiness', 'Neutral', etc.
+                        emotion, scores = self.emotion_detector.predict_emotions(face_region, logits=False)
+                        
+                        # Find max score for confidence
+                        confidence = max(scores)
+                        
+                        # Normalize to lowercase for consistency
+                        emotion_lower = emotion.lower()
+                        
+                        # Apply smoothing
+                        smoothed_emotion = self.smooth_emotion(person_id, emotion_lower)
+                        
+                        # Update cache
+                        self.cached_results[person_id]['emotion'] = smoothed_emotion
+                        self.cached_results[person_id]['emotion_conf'] = confidence
+                            
+                    except Exception as e:
+                        print(f"!!! HSEmotion ERROR (Person {idx+1}): {e}")
+                        pass
             
             # Analyze body attributes
             if should_analyze_body_local:
                 body_type = self.analyze_body_type(keypoints, person['bbox'])
+                
+                # Generate silhouette mask for accurate color extraction (Remove background)
+                # This ensures we only analyze pixels belonging to the person
+                full_mask = self.create_person_silhouette_from_keypoints(
+                    keypoints, person['bbox'], frame.shape[0], frame.shape[1]
+                )
+                
+                # Crop mask to person ROI
+                person_mask_roi = full_mask[y1:y2, x1:x2]
                 
                 h = person_roi.shape[0]
                 mid = h // 2
                 upper_roi = person_roi[:mid, :]
                 lower_roi = person_roi[mid:, :]
                 
-                upper_color, upper_color_conf = self.get_color(upper_roi)
-                lower_color, lower_color_conf = self.get_color(lower_roi)
+                # Split mask for upper/lower
+                upper_mask = None
+                lower_mask = None
+                
+                if person_mask_roi.shape[:2] == person_roi.shape[:2]:
+                    upper_mask = person_mask_roi[:mid, :]
+                    lower_mask = person_mask_roi[mid:, :]
+                
+                upper_color, upper_color_conf = self.get_color(upper_roi, upper_mask)
+                lower_color, lower_color_conf = self.get_color(lower_roi, lower_mask)
+                
+                # Upper color filtering (Confidence threshold)
+                if upper_color and upper_color_conf < 0.6:
+                    upper_color = None
+                
+                # Lower color filtering (Confidence threshold)
+                if lower_color and lower_color_conf < 0.6:
+                    lower_color = None
                 
                 # Classify clothing type
                 clothing_type = self.classify_clothing_type(person_roi, keypoints, upper_roi, lower_roi)

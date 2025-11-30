@@ -10,7 +10,7 @@
 # ESP32 串口端口
 # Windows: 'COM3', 'COM4', 等
 # Linux/Mac: '/dev/ttyUSB0', '/dev/ttyACM0', 等
-ARM_PORT = 'COM3'
+ARM_PORT = 'COM4'
 
 # 串口波特率（不要修改，除非你修改了ESP32固件）
 ARM_BAUDRATE = 115200
