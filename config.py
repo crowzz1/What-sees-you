@@ -7,13 +7,13 @@
 # 硬件配置
 # ============================================================
 
-# ESP32 串口端口
+# 机械臂驱动板串口端口 (STS Driver)
 # Windows: 'COM3', 'COM4', 等
 # Linux/Mac: '/dev/ttyUSB0', '/dev/ttyACM0', 等
 ARM_PORT = 'COM4'
 
-# 串口波特率（不要修改，除非你修改了ESP32固件）
-ARM_BAUDRATE = 115200
+# 串口波特率 (STS舵机默认为 1000000)
+ARM_BAUDRATE = 1000000
 
 # 摄像头设备ID
 # 0 = 默认摄像头（通常是笔记本内置摄像头）
@@ -21,8 +21,8 @@ ARM_BAUDRATE = 115200
 CAMERA_ID = 0
 
 # 摄像头分辨率
-CAMERA_WIDTH = 640
-CAMERA_HEIGHT = 480
+CAMERA_WIDTH = 1920
+CAMERA_HEIGHT = 1080
 
 
 # ============================================================
