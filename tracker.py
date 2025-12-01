@@ -33,10 +33,10 @@ cv2.destroyAllWindows = _cv2_destroyAllWindows
 # 电机 3 (肘部): 数值大 = 伸展 (最大活动度)，数值小 = 收缩 (最小活动度)
 # 电机 4 (腕部): 数值小 = 伸展 (最大活动度)，数值大 = 收缩 (最小活动度)
 MOTOR_CALIBRATION = {
-    1: {'center': 2048, 'home': 3128, 'min': 1135, 'max': 3128, 'name': '基座'},
-    2: {'center': 2048, 'home': 3715, 'min': 1600, 'max': 2400, 'name': '肩部(小=伸)'},
-    3: {'center': 2048, 'home': 3835, 'min': 1600, 'max': 2500, 'name': '肘部(大=伸)'}, 
-    4: {'center': 2048, 'home': 2718, 'min': 1500, 'max': 2600, 'name': '腕部(小=伸)'}, 
+    1: {'center': 2048, 'home': 2048, 'min': 1141, 'max': 3225, 'name': '基座'},
+    2: {'center': 2048, 'home': 3715, 'min': 1687, 'max': 2318, 'name': '肩部(小=伸)'},
+    3: {'center': 2048, 'home': 3796, 'min': 1616, 'max': 2302, 'name': '肘部(大=伸)'}, 
+    4: {'center': 2048, 'home': 2803, 'min': 1500, 'max': 2600, 'name': '腕部(小=伸)'}, 
 }
 
 class AdvancedTracker:
