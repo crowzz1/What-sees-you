@@ -399,7 +399,7 @@ class CompletePersonFaceAnalyzer:
     
     def analyze_faces(self, frame):
         """Analyze all faces using InsightFace"""
-        if not self.face_enabled:
+        if not self.face_enabled or not hasattr(self, 'face_app'):
             return []
         
         try:
