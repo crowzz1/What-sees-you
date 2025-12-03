@@ -352,7 +352,7 @@ class GlitchArtEffect:
         # 如果没有检测到人，显示"NO SIGNAL"
         if len(results) == 0:
             text = "NO SIGNAL DETECTED"
-            font_scale = 0.8
+            font_scale = 0.7
             thickness = 2
             color = (255, 255, 255)  # 白色
             

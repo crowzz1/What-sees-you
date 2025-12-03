@@ -25,38 +25,43 @@ from osc_control import OscController # 导入OSC控制器
 class GalleryView:
     """画廊式视图系统"""
     
-    def __init__(self, camera_id=0, window_width=1440, window_height=1080):
+    def __init__(self, camera_id=0, window_width=1920, window_height=1080):
         """
         Args:
             camera_id: 摄像头设备ID
-            window_width: 窗口宽度 (默认 1440x1080, 4:3比例)
+            window_width: 窗口宽度 (1920x1080)
             window_height: 窗口高度
         """
         self.window_width = window_width
         self.window_height = window_height
         
-        # 四宫格布局：不对称
-        # 左侧占3/4，右侧占1/4
-        self.left_width = int(window_width * 0.75)
-        self.right_width = window_width - self.left_width
+        # === 新布局定义 (1920x1080) ===
+        # 上半部分高度
+        self.top_height = 810
+        # 下半部分高度
+        self.bottom_height = 1080 - 810 # = 270
         
-        # 高度调整：为了让左上角保持 16:9 比例 (1080x608)
-        # 1080 / (16/9) = 607.5 -> 608
-        self.top_height = int(self.left_width / (16/9))
-        self.bottom_height = window_height - self.top_height
+        # 左上角宽度
+        self.left_width = 1440
+        # 右上角宽度
+        self.right_width = 1920 - 1440 # = 480
         
-        # self.quad_height 已弃用，使用 top_height 和 bottom_height 替代
+        # 下半部分分割
+        self.bottom_left_width = 960
+        self.bottom_mid_width = 480
+        self.bottom_right_width = 480
         
         print("=" * 60)
-        print("画廊式视图系统 - 不对称布局 (16:9 优化)")
+        print("画廊式视图系统 - 自定义 16:9 布局")
         print("=" * 60)
         print(f"窗口尺寸: {window_width}x{window_height}")
-        print(f"上方区域高度: {self.top_height} (16:9 aspect for left)")
-        print(f"下方区域高度: {self.bottom_height}")
-        print(f"左上区域: {self.left_width}x{self.top_height}")
-        print(f"右上区域: {self.right_width}x{self.top_height}")
-        print("布局: 左上=黑色格子 | 右上=故障艺术 (Glitch Art)")
-        print("      左下=人物信息 | 右下=手部追踪(Advanced Tracker)")
+        print(f"Top Area: Height {self.top_height}")
+        print(f"  - Top Left:  {self.left_width}x{self.top_height}")
+        print(f"  - Top Right: {self.right_width}x{self.top_height}")
+        print(f"Bottom Area: Height {self.bottom_height}")
+        print(f"  - Bot Left:  {self.bottom_left_width}x{self.bottom_height}")
+        print(f"  - Bot Mid:   {self.bottom_mid_width}x{self.bottom_height} (Blank)")
+        print(f"  - Bot Right: {self.bottom_right_width}x{self.bottom_height} (Tracker)")
         print("=" * 60)
         
         # 打开摄像头
@@ -294,189 +299,245 @@ class GalleryView:
         """
         创建左下角文本信息区域
         """
-        # 创建黑色背景，使用左侧宽度和下方高度
-        info_canvas = np.zeros((self.bottom_height, self.left_width, 3), dtype=np.uint8)
+        # 创建黑色背景，使用定义的 bottom_left_width
+        info_canvas = np.zeros((self.bottom_height, self.bottom_left_width, 3), dtype=np.uint8)
         
         if len(results) == 0:
             cv2.putText(info_canvas, "No person detected", 
                        (30, self.bottom_height // 2),
-                       cv2.FONT_HERSHEY_SIMPLEX, 1.0, (150, 150, 150), 2)
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (150, 150, 150), 2)
             return info_canvas
         
         # 显示人物信息
         y_offset = 40
         line_height = 35
         
-        # 动态调整字体大小和行高
-        num_persons = len(results)
-        # 可用高度减去顶部padding和每个人的间隔
-        available_height = self.bottom_height - 80 - (num_persons * 20)
-        # 每个人所需的基础高度（大约4行文本）
-        required_height_per_person = 4 * 35
+        # 找到要显示的目标（优先 Target，否则显示第一个人）
+        target_person = None
+        if len(results) > 0:
+            # 1. 尝试找标记为 Target 的人
+            for r in results:
+                if r.get('is_target', False):
+                    target_person = r
+                    break
+            
+            # 2. 如果没找到 Target，默认显示第一个人
+            if target_person is None:
+                target_person = results[0]
         
-        scale_factor = 1.0
-        if (num_persons * required_height_per_person) > available_height:
-             scale_factor = available_height / (num_persons * required_height_per_person)
-             # 限制最小缩放，避免字太小看不清
-             scale_factor = max(0.5, scale_factor)
-             
-        font_scale_base = 1.0 * scale_factor
-        font_scale_detail = 0.7 * scale_factor
-        line_height = int(35 * scale_factor)
-        
-        for idx, r in enumerate(results):
-            if y_offset > self.bottom_height - 20:
-                break  # 空间不足
+        if target_person:
+            r = target_person
+            
+            # 16号字体基准 (0.8)
+            font_scale_base = 0.8
+            # 14号字体基准 (0.7)
+            font_scale_detail = 0.7
+            line_height = 35
             
             # 人物标识
-            person_id = r.get('person_id', idx + 1)
+            person_id = r.get('person_id', '?')
+            # 获取置信度
+            person_conf = r.get('person_conf', r.get('conf', 0.0))
+            
             # 如果是被追踪的目标，加星号或高亮
             is_target = r.get('is_target', False)
             target_marker = "[TARGET]" if is_target else ""
             color = (0, 255, 0) if is_target else (255, 255, 255)
             
-            cv2.putText(info_canvas, f"PERSON {person_id} {target_marker}", 
+            # Line 1: ID + Conf + Target
+            cv2.putText(info_canvas, f"PERSON {person_id} ({person_conf:.0%}) {target_marker}", 
                        (30, y_offset),
                        cv2.FONT_HERSHEY_SIMPLEX, font_scale_base, color, 2)
             y_offset += line_height + 5
             
-            # 年龄
+            # Line 2: Age | Emotion | Build
+            line2_parts = []
+            
+            # Age
             if r.get('face'):
                 age = r['face'].get('smoothed_age', r['face'].get('age', 0))
-                cv2.putText(info_canvas, f"Age: {age}y", 
-                           (50, y_offset),
-                           cv2.FONT_HERSHEY_SIMPLEX, font_scale_detail, (200, 200, 200), 1)
-                y_offset += line_height
+                line2_parts.append(f"Age:{age}")
             
-            # 情绪
+            # Emotion
             if r.get('emotion'):
                 emotion = r['emotion'].capitalize()
                 conf = r.get('emotion_conf')
-                if conf is None:
-                    conf = 0.0
-                cv2.putText(info_canvas, f"Emotion: {emotion} ({conf:.0%})", 
+                if conf is not None:
+                    line2_parts.append(f"Emo:{emotion}({conf:.0%})")
+                else:
+                    line2_parts.append(f"Emo:{emotion}")
+                
+            # Build
+            if r.get('body_type'):
+                build = r['body_type'].get('build', '')
+                if build:
+                    line2_parts.append(f"Build:{build}")
+            
+            if line2_parts:
+                line2_text = " | ".join(line2_parts)
+                cv2.putText(info_canvas, line2_text, 
                            (50, y_offset),
                            cv2.FONT_HERSHEY_SIMPLEX, font_scale_detail, (200, 200, 200), 1)
                 y_offset += line_height
             
-            # 体型
-            if r.get('body_type'):
-                build = r['body_type'].get('build', '')
-                if build:
-                    cv2.putText(info_canvas, f"Build: {build}", 
-                               (50, y_offset),
-                               cv2.FONT_HERSHEY_SIMPLEX, font_scale_detail, (200, 200, 200), 1)
-                    y_offset += line_height
-            
-            # 衣服
+            # Line 3: Clothing (Type + Color + Conf)
+            line3_parts = []
             if r.get('clothing'):
                 clothing = r['clothing']
+                clothing_type = clothing.get('type', {})
                 
-                # 上衣颜色
+                # Upper
+                upper_type = clothing_type.get('upper', '')
                 upper_color = clothing.get('upper_color', '')
-                if upper_color:
-                    cv2.putText(info_canvas, f"Upper: {upper_color}", 
-                               (50, y_offset),
-                               cv2.FONT_HERSHEY_SIMPLEX, font_scale_detail, (200, 200, 200), 1)
-                    y_offset += line_height
-
-                # 下装颜色
+                upper_conf = clothing.get('upper_color_conf')
+                
+                if upper_type or upper_color:
+                    # 构建 "Type(Color,Conf)" 格式
+                    u_str = f"Up:{upper_type if upper_type else 'Top'}"
+                    
+                    extras = []
+                    if upper_color: extras.append(upper_color)
+                    if upper_conf is not None: extras.append(f"{upper_conf:.0%}")
+                    
+                    if extras:
+                        u_str += f"({','.join(extras)})"
+                    line3_parts.append(u_str)
+                
+                # Lower
+                lower_type = clothing_type.get('lower', '')
                 lower_color = clothing.get('lower_color', '')
-                if lower_color:
-                    cv2.putText(info_canvas, f"Lower: {lower_color}", 
-                               (50, y_offset),
-                               cv2.FONT_HERSHEY_SIMPLEX, font_scale_detail, (200, 200, 200), 1)
-                    y_offset += line_height
-            
-            # 描述（截断显示）
+                lower_conf = clothing.get('lower_color_conf')
+                
+                if lower_type or lower_color:
+                    l_str = f"Low:{lower_type if lower_type else 'Bottom'}"
+                    
+                    extras = []
+                    if lower_color: extras.append(lower_color)
+                    if lower_conf is not None: extras.append(f"{lower_conf:.0%}")
+                    
+                    if extras:
+                        l_str += f"({','.join(extras)})"
+                    line3_parts.append(l_str)
+                
+            if line3_parts:
+                line3_text = " | ".join(line3_parts)
+                cv2.putText(info_canvas, line3_text, 
+                           (50, y_offset),
+                           cv2.FONT_HERSHEY_SIMPLEX, font_scale_detail, (200, 200, 200), 1)
+                y_offset += line_height
+
+            # Line 4+: Description (Auto Wrap)
             description = r.get('description', '')
             if description:
-                # 使用新的宽度计算最大字符数
-                max_width = self.left_width - 80
-                # 估算：每个字符大约占 font_scale * 20 像素
-                char_width_approx = max(10, int(font_scale_detail * 20))
-                max_chars = max(20, max_width // char_width_approx)
+                # 计算每行最大字符数 (基于宽度 960px)
+                # 14号字体 (0.7) 每个字符约占 14-15px (宽)
+                char_width_approx = 15 
+                max_chars_per_line = (self.bottom_left_width - 80) // char_width_approx
                 
-                desc_short = description[:max_chars] + "..." if len(description) > max_chars else description
+                # 简单的换行逻辑
+                words = description.split(' ')
+                current_line = ""
                 
-                cv2.putText(info_canvas, desc_short, 
-                           (50, y_offset),
-                           cv2.FONT_HERSHEY_SIMPLEX, font_scale_detail, (180, 180, 180), 1)
-                y_offset += line_height
-            
-            y_offset += int(20 * scale_factor)  # 人物间隔
+                for word in words:
+                    # 试探性加上这个词
+                    test_line = current_line + " " + word if current_line else word
+                    
+                    if len(test_line) <= max_chars_per_line:
+                        current_line = test_line
+                    else:
+                        # 当前行满了，绘制并换行
+                        cv2.putText(info_canvas, current_line, 
+                                   (50, y_offset),
+                                   cv2.FONT_HERSHEY_SIMPLEX, font_scale_detail, (180, 180, 180), 1)
+                        y_offset += line_height
+                        current_line = word # 新行的开始
+                        
+                        # 安全检查：防止画出界
+                        if y_offset > self.bottom_height - 10:
+                            break
+                
+                # 绘制最后一行
+                if current_line and y_offset <= self.bottom_height - 10:
+                    cv2.putText(info_canvas, current_line, 
+                               (50, y_offset),
+                               cv2.FONT_HERSHEY_SIMPLEX, font_scale_detail, (180, 180, 180), 1)
         
         return info_canvas
 
     def create_tracker_view(self, frame, results=None, precomputed_frame=None):
         """
         创建右下角追踪器视图
-        使用 AdvancedTracker 处理当前帧
+        使用 AdvancedTracker 处理当前帧 (仅运行逻辑，不显示GUI)
         """
-        if precomputed_frame is not None:
-            tracker_frame = precomputed_frame
-        elif self.tracker:
-            # 让追踪器处理这一帧（识别+控制电机+绘图）
-            # 传入 external_results=results 避免重复推理，提升帧率
-            tracker_frame = self.tracker.process_frame(frame, external_results=results)
+        # 使用 bottom_right_width (480)
+        target_w = self.bottom_right_width
+        target_h = self.bottom_height
+        
+        # 创建纯黑背景
+        canvas = np.zeros((target_h, target_w, 3), dtype=np.uint8)
+
+        # 即使不显示，也必须运行追踪逻辑来控制电机
+        if self.tracker:
+             # external_results=results 避免重复推理
+             # process_frame 返回的是 annotated_frame，我们直接忽略它，只利用其副作用(控制电机)
+             # 注意：如果 precomputed_frame 已经传进来了，说明逻辑已经在外面跑过了，这里就不用跑了
+             if precomputed_frame is None:
+                 self.tracker.process_frame(frame, external_results=results)
         else:
-             # 如果追踪器未初始化
-            canvas = np.zeros((self.bottom_height, self.right_width, 3), dtype=np.uint8)
             cv2.putText(canvas, "TRACKER ERROR", 
-                       (self.right_width//2 - 100, self.bottom_height//2),
+                       (target_w//2 - 100, target_h//2),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-            return canvas
             
-        # 调整大小以适应右下角区域 (使用右侧宽度，下方高度)
-        return self.resize_to_fit(tracker_frame, self.right_width, self.bottom_height)
+        return canvas
 
     def create_composite_view(self, silhouette_frame, glitch_frame, results, frame, precomputed_tracker_frame=None):
         """
-        创建组合视图
-        左上(3/4, 16:9)=黑色格子, 右上(1/4, 延伸)=故障艺术
-        左下(3/4)=人物信息, 右下(1/4)=空(黑色) - 但后台运行追踪器
+        创建组合视图 (1920x1080)
         """
         # 创建主画布
         canvas = np.zeros((self.window_height, self.window_width, 3), dtype=np.uint8)
         
-        # 调整各区域大小
+        # --- 1. 上半部分 ---
+        # 左上 (Silhouette) - 1440x810
         silhouette_resized = self.resize_to_fit(silhouette_frame, self.left_width, self.top_height)
-        glitch_resized = self.resize_to_fit(glitch_frame, self.right_width, self.top_height)
-        
-        # 生成其他区域
-        info_area = self.create_info_quadrant(results)
-        
-        # 右下角：运行追踪器但不显示其画面
-        # 如果 precomputed_tracker_frame 有值，create_tracker_view 会直接使用它
-        _ = self.create_tracker_view(frame, results=results, precomputed_frame=precomputed_tracker_frame)
-        
-        # 放置四个区域
-        # 左上角 - 黑色格子
         canvas[0:self.top_height, 0:self.left_width] = silhouette_resized
         
-        # 右上角 - 故障艺术
+        # 右上 (Glitch) - 480x810
+        glitch_resized = self.resize_to_fit(glitch_frame, self.right_width, self.top_height)
         canvas[0:self.top_height, self.left_width:self.window_width] = glitch_resized
         
-        # 左下角 - 人物信息
-        canvas[self.top_height:self.window_height, 0:self.left_width] = info_area
+        # --- 2. 下半部分 ---
+        # 左下 (Info) - 960x270
+        info_area = self.create_info_quadrant(results) # 已经在内部使用了 bottom_left_width
+        canvas[self.top_height:self.window_height, 0:self.bottom_left_width] = info_area
         
-        # 右下角 - 保持黑色背景 (不显示追踪器画面)
-        # 已经是 zeros 初始化了，不需要额外操作
+        # 中下 (Blank/Black) - 480x270
+        # 默认为黑色，不需要额外操作
         
-        # 绘制分隔线
-        # 垂直线
-        cv2.line(canvas, (self.left_width, 0), (self.left_width, self.window_height),
-                (80, 80, 80), 2)
-        # 水平线
-        cv2.line(canvas, (0, self.top_height), (self.window_width, self.top_height),
-                (80, 80, 80), 2)
+        # 右下 (Tracker) - 480x270
+        # x: 1440 ~ 1920
+        tracker_view = self.create_tracker_view(frame, results=results, precomputed_frame=precomputed_tracker_frame)
+        start_x_right = self.bottom_left_width + self.bottom_mid_width # 960 + 480 = 1440
+        canvas[self.top_height:self.window_height, start_x_right:self.window_width] = tracker_view
         
-        # 显示FPS（左上角）
-        cv2.putText(canvas, f"FPS: {self.current_fps:.1f}", (20, 50),
-                   self.text_font, 0.7, (0, 255, 0), 2)
-        cv2.putText(canvas, f"Persons: {len(results)}", (20, 85),
-                   self.text_font, 0.7, (0, 255, 0), 2)
+        # --- 3. 绘制分隔线 ---
+        # 颜色
+        line_color = (80, 80, 80)
+        thickness = 2
         
+        # 水平总线 (y=810)
+        cv2.line(canvas, (0, self.top_height), (self.window_width, self.top_height), line_color, thickness)
+        
+        # 垂直线 1: 分割左上/右上 (x=1440, y=0~810)
+        cv2.line(canvas, (self.left_width, 0), (self.left_width, self.top_height), line_color, thickness)
+        
+        # 垂直线 2: 下半部分分割 Info/Mid (x=960, y=810~1080)
+        cv2.line(canvas, (self.bottom_left_width, self.top_height), (self.bottom_left_width, self.window_height), line_color, thickness)
+        
+        # 垂直线 3: 下半部分分割 Mid/Right (x=1440, y=810~1080)
+        # 这个x正好等于 left_width，所以视觉上和垂直线1是对齐的，形成贯穿效果
+        cv2.line(canvas, (start_x_right, self.top_height), (start_x_right, self.window_height), line_color, thickness)
+
         return canvas
     
     def run(self):
@@ -634,7 +695,7 @@ if __name__ == "__main__":
     # 创建画廊视图
     gallery = GalleryView(
         camera_id=0,
-        window_width=1440, # 4:3 比例
+        window_width=1920, # 16:9 比例
         window_height=1080
     )
     gallery.run()
